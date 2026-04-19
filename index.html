@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v10";
+    const APP_VERSION = "v12";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -128,44 +128,48 @@
     // Uses a polling-based ready check rather than onRuntimeInitialized, which
     // is unreliable across opencv.js builds.
     let cvPromise = null;
-    function loadOpenCV() {
+    let cvLoadStatus = "not started"; // for diagnostics
+    function loadOpenCV(onStatus) {
+      if (onStatus) onStatus(cvLoadStatus);
       if (cvPromise) return cvPromise;
       cvPromise = new Promise((resolve, reject) => {
-        // Already loaded?
         if (typeof window.cv !== "undefined" && window.cv.Mat) {
+          cvLoadStatus = "ready";
           resolve(window.cv); return;
         }
 
-        const TIMEOUT_MS = 30000;
+        const TIMEOUT_MS = 20000;
         const start = Date.now();
+        const updateStatus = (s) => { cvLoadStatus = s; if (onStatus) onStatus(s); };
 
-        const checkReady = () => {
-          if (typeof window.cv !== "undefined" && window.cv.Mat) {
-            resolve(window.cv);
-            return true;
-          }
-          return false;
-        };
-
+        updateStatus("starting download");
         const script = document.createElement("script");
         script.src = "https://docs.opencv.org/4.10.0/opencv.js";
         script.async = true;
         script.onload = () => {
-          // The 'cv' global may not be immediately ready after script load — it
-          // finishes initializing asynchronously. Poll until Mat exists.
+          updateStatus("downloaded, initializing");
           const poll = setInterval(() => {
-            if (checkReady()) {
+            const elapsed = Date.now() - start;
+            if (typeof window.cv !== "undefined" && window.cv.Mat) {
               clearInterval(poll);
-            } else if (Date.now() - start > TIMEOUT_MS) {
+              updateStatus("ready");
+              resolve(window.cv);
+            } else if (elapsed > TIMEOUT_MS) {
               clearInterval(poll);
               cvPromise = null;
-              reject(new Error("OpenCV.js loaded but failed to initialize within " + (TIMEOUT_MS/1000) + "s"));
+              const hasGlobal = typeof window.cv !== "undefined";
+              const hasMat = hasGlobal && !!window.cv.Mat;
+              updateStatus(`init timed out (cv global: ${hasGlobal}, Mat: ${hasMat})`);
+              reject(new Error(`OpenCV init timed out after ${TIMEOUT_MS/1000}s (cv: ${hasGlobal}, Mat: ${hasMat})`));
+            } else {
+              updateStatus(`initializing… ${Math.floor(elapsed/1000)}s`);
             }
-          }, 100);
+          }, 200);
         };
-        script.onerror = () => {
+        script.onerror = (err) => {
+          updateStatus("network error");
           cvPromise = null;
-          reject(new Error("Failed to download OpenCV.js from the network"));
+          reject(new Error("Network error loading OpenCV.js"));
         };
         document.head.appendChild(script);
       });
@@ -250,6 +254,14 @@
       const [manualWeight, setManualWeight] = useState("");
       const [manualDate, setManualDate] = useState(new Date().toISOString().slice(0, 16));
       const [imageProcessing, setImageProcessing] = useState(false);
+      const [processingStatus, setProcessingStatus] = useState("");
+      const [debugLog, setDebugLog] = useState([]);
+      const [showDebugLog, setShowDebugLog] = useState(false);
+      const logLine = (msg) => {
+        const line = `${new Date().toLocaleTimeString()} ${msg}`;
+        console.log(line);
+        setDebugLog((prev) => [...prev.slice(-49), line]);
+      };
       const [processingError, setProcessingError] = useState("");
       const [detectedWeight, setDetectedWeight] = useState(null);
       const [editableWeight, setEditableWeight] = useState(""); // string for the editable input
@@ -355,6 +367,7 @@
       const sendCropped = async () => {
         if (!rawImage || !rawImageSize || !apiKey) return;
         setProcessingError("");
+        setProcessingStatus("");
         setImageProcessing(true);
         try {
           const canvas = await renderCropToCanvas();
@@ -368,14 +381,24 @@
           let usedEnhanced = false;
           if (enhancedReading) {
             try {
-              await loadOpenCV();
+              logLine(`Enhanced on. Canvas ${canvas.width}x${canvas.height}`);
+              setProcessingStatus("Loading OpenCV…");
+              logLine("Calling loadOpenCV…");
+              await loadOpenCV((s) => { setProcessingStatus(`OpenCV: ${s}`); logLine(`OpenCV status: ${s}`); });
+              logLine("OpenCV ready.");
+              setProcessingStatus("Processing image…");
+              logLine("Running preprocessForOcr…");
               const maskDataUrl = preprocessForOcr(canvas);
+              logLine(`Mask produced, ${Math.round(maskDataUrl.length / 1024)} KB`);
               const maskBase64 = maskDataUrl.split(",")[1];
               content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: rawBase64 } });
               content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: maskBase64 } });
               usedEnhanced = true;
+              setProcessingStatus("Sending to AI…");
             } catch (preErr) {
-              console.warn("Enhanced preprocessing failed, falling back to raw:", preErr);
+              console.warn("Enhanced preprocessing failed:", preErr);
+              logLine(`Enhanced FAILED: ${preErr.message}`);
+              setProcessingStatus(`Enhanced failed. Falling back to raw.`);
               content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: rawBase64 } });
             }
           } else {
@@ -459,6 +482,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
           setCroppedImage(null); // stay on crop screen so user can retry
         } finally {
           setImageProcessing(false);
+          setProcessingStatus("");
         }
       };
 
@@ -909,7 +933,8 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                         ? e(React.Fragment, null, e(Loader2, { size: 18, style: { animation: "spin 1s linear infinite", marginRight: 8, verticalAlign: "middle" } }), apiKey ? "Reading…" : "Cropping…")
                         : (apiKey ? "Check" : "Enter reading")
                     )
-                  )
+                  ),
+                  imageProcessing && processingStatus && e("div", { style: styles.processingStatus }, processingStatus)
                 ),
                 // Stage 3: review — detected weight, show cropped image, editable reading
                 detectedWeight != null && croppedImage && e(React.Fragment, null,
@@ -1062,7 +1087,49 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                   }
                 },
               }, "Clear all data"),
+
+              e("div", { style: { height: 20 } }),
+              e("div", { style: styles.settingsGroupLabel }, "Debug log"),
+              e("div", { style: styles.hint }, `${debugLog.length} line${debugLog.length === 1 ? "" : "s"} recorded this session.`),
+              e("div", { style: styles.btnRow },
+                e("button", {
+                  style: styles.secondaryBtn,
+                  onClick: () => { setShowSettings(false); setShowDebugLog(true); },
+                }, "View log"),
+                e("button", {
+                  style: styles.secondaryBtn,
+                  onClick: () => { setDebugLog([]); },
+                  disabled: debugLog.length === 0,
+                }, "Clear log")
+              ),
+
               e("div", { style: styles.versionFooter }, `Ledger ${APP_VERSION}`)
+            )
+          ),
+
+          // Debug log sheet
+          showDebugLog && e("div", { style: styles.sheetBackdrop, onClick: () => setShowDebugLog(false) },
+            e("div", { style: styles.sheet, onClick: (ev) => ev.stopPropagation() },
+              e("div", { style: styles.sheetHandle }),
+              e("div", { style: styles.sheetHeader },
+                e("h2", { style: styles.sheetTitle }, "Debug log"),
+                e("button", { style: styles.closeBtn, onClick: () => setShowDebugLog(false) }, e(X, { size: 18 }))
+              ),
+              e("div", { style: styles.debugLogBox },
+                debugLog.length === 0
+                  ? e("div", { style: { color: "var(--ink-faint)", fontStyle: "italic" } }, "No log entries yet. Take a photo with Enhanced on to generate entries.")
+                  : debugLog.map((l, i) => e("div", { key: i, style: styles.debugLogLine }, l))
+              ),
+              e("div", { style: styles.btnRow },
+                e("button", {
+                  style: styles.secondaryBtn,
+                  onClick: () => {
+                    const text = debugLog.join("\n");
+                    if (navigator.clipboard) navigator.clipboard.writeText(text);
+                  },
+                  disabled: debugLog.length === 0,
+                }, "Copy to clipboard")
+              )
             )
           ),
 
@@ -1356,13 +1423,16 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
       fieldLabel: { display: "block", fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-soft)", fontWeight: 600, marginBottom: 6, marginTop: 12 },
       settingsGroupLabel: { fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--ink-soft)", fontWeight: 600, marginBottom: 6 },
       toggleRow: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", fontSize: 14, color: "var(--ink)", cursor: "pointer" },
+      processingStatus: { marginTop: 10, fontSize: 12, color: "var(--ink-soft)", fontFamily: "monospace", textAlign: "center" },
+      debugLogBox: { background: "#111", color: "#e0e0e0", fontFamily: "monospace", fontSize: 11, padding: 12, borderRadius: 8, maxHeight: "50vh", overflowY: "auto", marginBottom: 12, lineHeight: 1.5 },
+      debugLogLine: { whiteSpace: "pre-wrap", wordBreak: "break-word", marginBottom: 2 },
       input: { width: "100%", padding: "12px 14px", border: "1px solid var(--line)", borderRadius: 10, fontSize: 16, background: "var(--paper)", color: "var(--ink)" },
       primaryBtn: { width: "100%", padding: "14px", background: "var(--ink)", color: "var(--paper)", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 500 },
       secondaryBtn: { flex: 1, padding: "10px 8px", background: "var(--paper-soft)", color: "var(--ink)", border: "1px solid var(--line)", borderRadius: 10, fontSize: 12, fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 },
       btnRow: { display: "flex", gap: 8, marginTop: 8 },
       dangerBtn: { width: "100%", padding: "12px", background: "transparent", color: "var(--accent-red)", border: "1px solid rgba(181, 74, 58, 0.3)", borderRadius: 10, fontSize: 14, fontWeight: 500, marginTop: 16 },
-      versionFooter: { textAlign: "center", fontSize: 10, color: "var(--ink-faint)", marginTop: 24, letterSpacing: "0.1em", textTransform: "uppercase" },
-      versionBadge: { fontSize: 10, color: "var(--ink-faint)", letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 },
+      versionFooter: { textAlign: "center", fontSize: 10, color: "var(--ink-faint)", marginTop: 24, letterSpacing: "0.1em" },
+      versionBadge: { fontSize: 10, color: "var(--ink-faint)", letterSpacing: "0.1em", fontWeight: 600 },
       hint: { fontSize: 12, color: "var(--ink-soft)", marginTop: 4, marginBottom: 8 },
       inlineMessage: { marginTop: 10, padding: "10px 12px", borderRadius: 8, fontSize: 12, border: "1px solid" },
     };
