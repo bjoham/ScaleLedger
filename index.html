@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v13";
+    const APP_VERSION = "v14";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -146,27 +146,51 @@
         const script = document.createElement("script");
         script.src = "https://docs.opencv.org/4.5.5/opencv.js";
         script.async = true;
-        script.onload = () => {
-          updateStatus("downloaded, initializing");
-          const poll = setInterval(() => {
-            const elapsed = Date.now() - start;
-            if (typeof window.cv !== "undefined" && window.cv.Mat) {
-              clearInterval(poll);
-              updateStatus("ready");
-              resolve(window.cv);
-            } else if (elapsed > TIMEOUT_MS) {
-              clearInterval(poll);
+        script.onload = async () => {
+          const cvType = typeof window.cv;
+          updateStatus(`downloaded (cv type: ${cvType})`);
+          try {
+            // Newer builds: cv is a factory function → await it
+            if (cvType === "function") {
+              updateStatus("calling cv() factory");
+              const ready = await window.cv();
+              window.cv = ready;
+              if (window.cv && window.cv.Mat) {
+                updateStatus("ready (factory)");
+                resolve(window.cv);
+                return;
+              }
               cvPromise = null;
-              const hasGlobal = typeof window.cv !== "undefined";
-              const hasMat = hasGlobal && !!window.cv.Mat;
-              updateStatus(`init timed out (cv global: ${hasGlobal}, Mat: ${hasMat})`);
-              reject(new Error(`OpenCV init timed out after ${TIMEOUT_MS/1000}s (cv: ${hasGlobal}, Mat: ${hasMat})`));
-            } else {
-              updateStatus(`initializing… ${Math.floor(elapsed/1000)}s`);
+              updateStatus("factory resolved but no Mat");
+              reject(new Error("cv() resolved but Mat missing"));
+              return;
             }
-          }, 200);
+            // Older builds: cv is an object, poll for cv.Mat
+            updateStatus("polling for cv.Mat");
+            const poll = setInterval(() => {
+              const elapsed = Date.now() - start;
+              if (typeof window.cv !== "undefined" && window.cv.Mat) {
+                clearInterval(poll);
+                updateStatus("ready (polled)");
+                resolve(window.cv);
+              } else if (elapsed > TIMEOUT_MS) {
+                clearInterval(poll);
+                cvPromise = null;
+                const typeofCv = typeof window.cv;
+                const keys = window.cv ? Object.keys(window.cv).slice(0, 5).join(",") : "n/a";
+                updateStatus(`timeout (cv type: ${typeofCv}, keys: ${keys})`);
+                reject(new Error(`OpenCV init timed out (cv type: ${typeofCv})`));
+              } else {
+                updateStatus(`polling… ${Math.floor(elapsed/1000)}s`);
+              }
+            }, 200);
+          } catch (err) {
+            cvPromise = null;
+            updateStatus(`error: ${err.message}`);
+            reject(err);
+          }
         };
-        script.onerror = (err) => {
+        script.onerror = () => {
           updateStatus("network error");
           cvPromise = null;
           reject(new Error("Network error loading OpenCV.js"));

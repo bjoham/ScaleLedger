@@ -1,6 +1,6 @@
 // Service worker for Weight Ledger.
 // Bump CACHE_VERSION on every release to invalidate old caches.
-const CACHE_VERSION = 'v13';
+const CACHE_VERSION = 'v14';
 const CACHE_NAME = `ledger-${CACHE_VERSION}`;
 
 const APP_SHELL = [
