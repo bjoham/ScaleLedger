@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v15";
+    const APP_VERSION = "v16";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -123,146 +123,223 @@
       return { slope, intercept };
     }
 
-    // ---------- OpenCV.js lazy loader ----------
-    // Only loads when the user has enabled "Enhanced scale reading" and taps Check.
-    // Uses a polling-based ready check rather than onRuntimeInitialized, which
-    // is unreliable across opencv.js builds.
-    let cvPromise = null;
-    let cvLoadStatus = "not started"; // for diagnostics
-    function loadOpenCV(onStatus) {
-      if (onStatus) onStatus(cvLoadStatus);
-      if (cvPromise) return cvPromise;
-      cvPromise = new Promise((resolve, reject) => {
-        if (typeof window.cv !== "undefined" && window.cv.Mat) {
-          cvLoadStatus = "ready";
-          resolve(window.cv); return;
-        }
+    // ---------- Pure-JS DSP preprocessing ----------
+    // Implements the scale_reader_pipeline.md recipe without OpenCV:
+    //   1. Gaussian blur (3-pass box-blur approximation, separable)
+    //   2. Morphological opening with rectangular kernel (erosion then dilation,
+    //      each done as two 1D passes using a monotonic-deque min/max filter)
+    //   3. Threshold at 30% of peak-to-valley residual
+    // Returns a data URL of the binary mask.
 
-        const TIMEOUT_MS = 60000;
-        const start = Date.now();
-        const updateStatus = (s) => { cvLoadStatus = s; if (onStatus) onStatus(s); };
-
-        updateStatus("starting download");
-        const script = document.createElement("script");
-        script.src = "https://docs.opencv.org/4.5.5/opencv.js";
-        script.async = true;
-        script.onload = async () => {
-          const cvType = typeof window.cv;
-          updateStatus(`downloaded (cv type: ${cvType})`);
-          try {
-            // Newer builds: cv is a factory function → await it
-            if (cvType === "function") {
-              updateStatus("calling cv() factory");
-              const ready = await window.cv();
-              window.cv = ready;
-              if (window.cv && window.cv.Mat) {
-                updateStatus("ready (factory)");
-                resolve(window.cv);
-                return;
-              }
-              cvPromise = null;
-              updateStatus("factory resolved but no Mat");
-              reject(new Error("cv() resolved but Mat missing"));
-              return;
-            }
-            // Older builds: cv is an object, poll for cv.Mat
-            updateStatus("polling for cv.Mat");
-            const poll = setInterval(() => {
-              const elapsed = Date.now() - start;
-              if (typeof window.cv !== "undefined" && window.cv.Mat) {
-                clearInterval(poll);
-                updateStatus("ready (polled)");
-                resolve(window.cv);
-              } else if (elapsed > TIMEOUT_MS) {
-                clearInterval(poll);
-                cvPromise = null;
-                const typeofCv = typeof window.cv;
-                const keys = window.cv ? Object.keys(window.cv).slice(0, 5).join(",") : "n/a";
-                updateStatus(`timeout (cv type: ${typeofCv}, keys: ${keys})`);
-                reject(new Error(`OpenCV init timed out (cv type: ${typeofCv})`));
-              } else {
-                updateStatus(`polling… ${Math.floor(elapsed/1000)}s`);
-              }
-            }, 200);
-          } catch (err) {
-            cvPromise = null;
-            updateStatus(`error: ${err.message}`);
-            reject(err);
+    // Three-pass box blur. boxSize should be odd.
+    function boxBlur1D(src, dst, width, height, radius, horizontal) {
+      const diameter = radius * 2 + 1;
+      if (horizontal) {
+        for (let y = 0; y < height; y++) {
+          const rowStart = y * width;
+          let sum = 0;
+          // Prime the window with left edge replicated
+          for (let i = -radius; i <= radius; i++) {
+            const xi = Math.max(0, Math.min(width - 1, i));
+            sum += src[rowStart + xi];
           }
-        };
-        script.onerror = () => {
-          updateStatus("network error");
-          cvPromise = null;
-          reject(new Error("Network error loading OpenCV.js"));
-        };
-        document.head.appendChild(script);
-      });
-      return cvPromise;
+          for (let x = 0; x < width; x++) {
+            dst[rowStart + x] = sum / diameter;
+            const addX = Math.min(width - 1, x + radius + 1);
+            const subX = Math.max(0, x - radius);
+            sum += src[rowStart + addX] - src[rowStart + subX];
+          }
+        }
+      } else {
+        for (let x = 0; x < width; x++) {
+          let sum = 0;
+          for (let i = -radius; i <= radius; i++) {
+            const yi = Math.max(0, Math.min(height - 1, i));
+            sum += src[yi * width + x];
+          }
+          for (let y = 0; y < height; y++) {
+            dst[y * width + x] = sum / diameter;
+            const addY = Math.min(height - 1, y + radius + 1);
+            const subY = Math.max(0, y - radius);
+            sum += src[addY * width + x] - src[subY * width + x];
+          }
+        }
+      }
     }
 
-    // ---------- DSP preprocessing (per scale_reader_pipeline.md) ----------
-    // Takes a source canvas, returns a data URL of the 30% threshold mask.
-    // Throws on OpenCV error; caller should fall back to the raw image.
-    function preprocessForOcr(sourceCanvas) {
-      const cv = window.cv;
-      const src = cv.imread(sourceCanvas);
-      const gray = new cv.Mat();
-      const ink = new cv.Mat();
-      const inkBlur = new cv.Mat();
-      const baseline = new cv.Mat();
-      const residual = new cv.Mat();
-      const mask = new cv.Mat();
-      let disk = null;
-      try {
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        // ink = 255 - gray  (segments become high)
-        const ones = new cv.Mat(gray.rows, gray.cols, gray.type(), new cv.Scalar(255));
-        cv.subtract(ones, gray, ink);
-        ones.delete();
-
-        const W = src.cols;
-        let strokeW = Math.max(5, Math.min(120, Math.floor(W / 20)));
-        // Gaussian kernel must be odd
-        let gk = strokeW % 2 === 1 ? strokeW : strokeW + 1;
-        const sigma = strokeW / 6.0;
-        cv.GaussianBlur(ink, inkBlur, new cv.Size(gk, gk), sigma, sigma, cv.BORDER_DEFAULT);
-
-        // Morphological opening with disk ≈ 3 × strokeW
-        let diskSz = Math.max(31, 3 * strokeW);
-        if (diskSz % 2 === 0) diskSz += 1;
-        disk = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(diskSz, diskSz));
-        cv.morphologyEx(inkBlur, baseline, cv.MORPH_OPEN, disk);
-
-        // residual = inkBlur - baseline, normalized to [0, ~1]
-        cv.subtract(inkBlur, baseline, residual);
-        residual.convertTo(residual, cv.CV_32F, 1.0 / 255.0);
-
-        // Find 5th and 99th percentiles manually (OpenCV.js has no np.percentile)
-        const data = residual.data32F;
-        // Sample every 4th pixel for speed on large images
-        const stride = Math.max(1, Math.floor(data.length / 20000));
-        const sample = [];
-        for (let i = 0; i < data.length; i += stride) sample.push(data[i]);
-        sample.sort((a, b) => a - b);
-        const valley = sample[Math.floor(sample.length * 0.05)];
-        const peak = sample[Math.floor(sample.length * 0.99)];
-        const threshold = valley + 0.30 * (peak - valley);
-
-        // mask = residual > threshold
-        cv.threshold(residual, mask, threshold, 255, cv.THRESH_BINARY);
-        mask.convertTo(mask, cv.CV_8U);
-
-        // Render to canvas
-        const outCanvas = document.createElement("canvas");
-        outCanvas.width = mask.cols;
-        outCanvas.height = mask.rows;
-        cv.imshow(outCanvas, mask);
-        return outCanvas.toDataURL("image/jpeg", 0.92);
-      } finally {
-        src.delete(); gray.delete(); ink.delete(); inkBlur.delete();
-        baseline.delete(); residual.delete(); mask.delete();
-        if (disk) disk.delete();
+    function gaussianBlurApprox(input, width, height, sigma) {
+      // Three box-blur passes approximate Gaussian with matching sigma.
+      // Box radius derived from sigma: r such that variance = (2r+1)^2/12 ≈ sigma^2 per pass.
+      const radius = Math.max(1, Math.round(Math.sqrt(12 * sigma * sigma / 3 + 1) / 2));
+      const a = new Float32Array(input.length);
+      const b = new Float32Array(input.length);
+      // Copy input → a
+      for (let i = 0; i < input.length; i++) a[i] = input[i];
+      for (let pass = 0; pass < 3; pass++) {
+        boxBlur1D(a, b, width, height, radius, true);
+        boxBlur1D(b, a, width, height, radius, false);
       }
+      return a;
+    }
+
+    // Monotonic-deque 1D min filter. size is total window size (odd).
+    function minFilter1D(src, dst, width, height, radius, horizontal) {
+      const diameter = radius * 2 + 1;
+      const deque = new Int32Array(diameter + 1);
+      if (horizontal) {
+        for (let y = 0; y < height; y++) {
+          const rowStart = y * width;
+          let head = 0, tail = 0;
+          for (let x = 0; x < width + radius; x++) {
+            if (x < width) {
+              const v = src[rowStart + x];
+              while (tail > head && src[rowStart + deque[tail - 1]] >= v) tail--;
+              deque[tail++] = x;
+            }
+            while (head < tail && deque[head] < x - radius - radius) head++;
+            const outX = x - radius;
+            if (outX >= 0 && outX < width) {
+              dst[rowStart + outX] = src[rowStart + deque[head]];
+            }
+          }
+        }
+      } else {
+        for (let x = 0; x < width; x++) {
+          let head = 0, tail = 0;
+          for (let y = 0; y < height + radius; y++) {
+            if (y < height) {
+              const v = src[y * width + x];
+              while (tail > head && src[deque[tail - 1] * width + x] >= v) tail--;
+              deque[tail++] = y;
+            }
+            while (head < tail && deque[head] < y - radius - radius) head++;
+            const outY = y - radius;
+            if (outY >= 0 && outY < height) {
+              dst[outY * width + x] = src[deque[head] * width + x];
+            }
+          }
+        }
+      }
+    }
+
+    // Monotonic-deque 1D max filter.
+    function maxFilter1D(src, dst, width, height, radius, horizontal) {
+      const diameter = radius * 2 + 1;
+      const deque = new Int32Array(diameter + 1);
+      if (horizontal) {
+        for (let y = 0; y < height; y++) {
+          const rowStart = y * width;
+          let head = 0, tail = 0;
+          for (let x = 0; x < width + radius; x++) {
+            if (x < width) {
+              const v = src[rowStart + x];
+              while (tail > head && src[rowStart + deque[tail - 1]] <= v) tail--;
+              deque[tail++] = x;
+            }
+            while (head < tail && deque[head] < x - radius - radius) head++;
+            const outX = x - radius;
+            if (outX >= 0 && outX < width) {
+              dst[rowStart + outX] = src[rowStart + deque[head]];
+            }
+          }
+        }
+      } else {
+        for (let x = 0; x < width; x++) {
+          let head = 0, tail = 0;
+          for (let y = 0; y < height + radius; y++) {
+            if (y < height) {
+              const v = src[y * width + x];
+              while (tail > head && src[deque[tail - 1] * width + x] <= v) tail--;
+              deque[tail++] = y;
+            }
+            while (head < tail && deque[head] < y - radius - radius) head++;
+            const outY = y - radius;
+            if (outY >= 0 && outY < height) {
+              dst[outY * width + x] = src[deque[head] * width + x];
+            }
+          }
+        }
+      }
+    }
+
+    // Opening = erosion then dilation. Approximates disk kernel with a square
+    // (sufficient for computing a smooth baseline, per the doc).
+    function morphOpen(input, width, height, radius) {
+      const eroded = new Float32Array(input.length);
+      const erodedTmp = new Float32Array(input.length);
+      const dilated = new Float32Array(input.length);
+      const dilatedTmp = new Float32Array(input.length);
+      // Erode: min filter
+      minFilter1D(input, erodedTmp, width, height, radius, true);
+      minFilter1D(erodedTmp, eroded, width, height, radius, false);
+      // Dilate: max filter
+      maxFilter1D(eroded, dilatedTmp, width, height, radius, true);
+      maxFilter1D(dilatedTmp, dilated, width, height, radius, false);
+      return dilated;
+    }
+
+    // Main preprocessing entry point. Matches preprocessForOcr contract:
+    // takes a source canvas, returns a data URL of the 30% threshold mask.
+    // Synchronous — no loader, no timeout.
+    function preprocessForOcr(sourceCanvas) {
+      const W = sourceCanvas.width;
+      const H = sourceCanvas.height;
+      const ctx = sourceCanvas.getContext("2d");
+      const imgData = ctx.getImageData(0, 0, W, H);
+      const rgba = imgData.data;
+
+      // 1. Grayscale → ink (255 - gray) in a single pass.
+      const ink = new Float32Array(W * H);
+      for (let i = 0, p = 0; i < rgba.length; i += 4, p++) {
+        // Luma approximation (same as cv.COLOR_RGBA2GRAY)
+        const gray = 0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2];
+        ink[p] = 255 - gray;
+      }
+
+      // 2. Determine stroke width from image width.
+      const strokeW = Math.max(5, Math.min(120, Math.floor(W / 20)));
+      const sigma = strokeW / 6.0;
+
+      // 3. Gaussian blur.
+      const inkBlur = gaussianBlurApprox(ink, W, H, sigma);
+
+      // 4. Morphological opening with radius ≈ 1.5 × strokeW
+      // (square window of side 3×strokeW, like the OpenCV version).
+      const openRadius = Math.max(15, Math.floor(1.5 * strokeW));
+      const baseline = morphOpen(inkBlur, W, H, openRadius);
+
+      // 5. residual = inkBlur - baseline, normalized to [0, 1-ish].
+      const residual = new Float32Array(W * H);
+      for (let i = 0; i < residual.length; i++) {
+        const v = (inkBlur[i] - baseline[i]) / 255;
+        residual[i] = v > 0 ? v : 0;
+      }
+
+      // 6. Percentile via sampled sort.
+      const stride = Math.max(1, Math.floor(residual.length / 20000));
+      const sample = [];
+      for (let i = 0; i < residual.length; i += stride) sample.push(residual[i]);
+      sample.sort((a, b) => a - b);
+      const valley = sample[Math.floor(sample.length * 0.05)];
+      const peak = sample[Math.floor(sample.length * 0.99)];
+      const threshold = valley + 0.30 * (peak - valley);
+
+      // 7. Threshold → 8-bit mask.
+      const maskData = new Uint8ClampedArray(W * H * 4);
+      for (let i = 0, p = 0; i < residual.length; i++, p += 4) {
+        const v = residual[i] > threshold ? 255 : 0;
+        maskData[p] = v;
+        maskData[p + 1] = v;
+        maskData[p + 2] = v;
+        maskData[p + 3] = 255;
+      }
+
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = W;
+      outCanvas.height = H;
+      const outCtx = outCanvas.getContext("2d");
+      outCtx.putImageData(new ImageData(maskData, W, H), 0, 0);
+      return outCanvas.toDataURL("image/jpeg", 0.92);
     }
 
     function WeightTracker() {
@@ -410,14 +487,12 @@
           if (enhancedReading) {
             try {
               logLine(`Enhanced on. Canvas ${canvas.width}x${canvas.height}`);
-              setProcessingStatus("Loading OpenCV…");
-              logLine("Calling loadOpenCV…");
-              await loadOpenCV((s) => { setProcessingStatus(`OpenCV: ${s}`); logLine(`OpenCV status: ${s}`); });
-              logLine("OpenCV ready.");
               setProcessingStatus("Processing image…");
-              logLine("Running preprocessForOcr…");
+              logLine("Running preprocessForOcr (pure JS)…");
+              const t0 = performance.now();
               const maskDataUrl = preprocessForOcr(canvas);
-              logLine(`Mask produced, ${Math.round(maskDataUrl.length / 1024)} KB`);
+              const elapsed = Math.round(performance.now() - t0);
+              logLine(`Mask produced in ${elapsed}ms, ${Math.round(maskDataUrl.length / 1024)} KB`);
               const maskBase64 = maskDataUrl.split(",")[1];
               content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: rawBase64 } });
               content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: maskBase64 } });
@@ -1062,7 +1137,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
               e("div", { style: { height: 20 } }),
               e("div", { style: styles.settingsGroupLabel }, "Enhanced scale reading"),
               e("div", { style: styles.hint },
-                "Preprocesses the photo to isolate LCD segments before sending to the AI. More accurate on worn or reflective displays. Downloads ~8 MB on first use."
+                "Preprocesses the photo to isolate LCD segments before sending to the AI. May improve accuracy on worn or reflective displays."
               ),
               e("label", { style: styles.toggleRow },
                 e("input", {

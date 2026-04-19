@@ -1,6 +1,6 @@
 // Service worker for Weight Ledger.
 // Bump CACHE_VERSION on every release to invalidate old caches.
-const CACHE_VERSION = 'v15';
+const CACHE_VERSION = 'v16';
 const CACHE_NAME = `ledger-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -87,7 +87,6 @@ self.addEventListener('fetch', (event) => {
   if (url.hostname === 'esm.sh' ||
       url.hostname === 'cdn.jsdelivr.net' ||
       url.hostname === 'unpkg.com' ||
-      url.hostname === 'docs.opencv.org' ||
       url.hostname === 'fonts.googleapis.com' ||
       url.hostname === 'fonts.gstatic.com') {
     event.respondWith(
