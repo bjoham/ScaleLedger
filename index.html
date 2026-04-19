@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v12";
+    const APP_VERSION = "v13";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -138,13 +138,13 @@
           resolve(window.cv); return;
         }
 
-        const TIMEOUT_MS = 20000;
+        const TIMEOUT_MS = 60000;
         const start = Date.now();
         const updateStatus = (s) => { cvLoadStatus = s; if (onStatus) onStatus(s); };
 
         updateStatus("starting download");
         const script = document.createElement("script");
-        script.src = "https://docs.opencv.org/4.10.0/opencv.js";
+        script.src = "https://docs.opencv.org/4.5.5/opencv.js";
         script.async = true;
         script.onload = () => {
           updateStatus("downloaded, initializing");
@@ -255,12 +255,16 @@
       const [manualDate, setManualDate] = useState(new Date().toISOString().slice(0, 16));
       const [imageProcessing, setImageProcessing] = useState(false);
       const [processingStatus, setProcessingStatus] = useState("");
-      const [debugLog, setDebugLog] = useState([]);
+      const [debugLog, setDebugLog] = useState(() => store.get("debug-log") || []);
       const [showDebugLog, setShowDebugLog] = useState(false);
       const logLine = (msg) => {
         const line = `${new Date().toLocaleTimeString()} ${msg}`;
         console.log(line);
-        setDebugLog((prev) => [...prev.slice(-49), line]);
+        setDebugLog((prev) => {
+          const next = [...prev.slice(-49), line];
+          try { store.set("debug-log", next); } catch {}
+          return next;
+        });
       };
       const [processingError, setProcessingError] = useState("");
       const [detectedWeight, setDetectedWeight] = useState(null);
@@ -1098,7 +1102,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                 }, "View log"),
                 e("button", {
                   style: styles.secondaryBtn,
-                  onClick: () => { setDebugLog([]); },
+                  onClick: () => { setDebugLog([]); store.remove("debug-log"); },
                   disabled: debugLog.length === 0,
                 }, "Clear log")
               ),
