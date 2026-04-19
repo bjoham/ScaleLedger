@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v16";
+    const APP_VERSION = "v17";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -557,7 +557,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
             },
             body: JSON.stringify({
               model: "claude-sonnet-4-5",
-              max_tokens: 200,
+              max_tokens: 500,
               messages: [{ role: "user", content }],
             }),
           });
@@ -567,7 +567,15 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
           }
           const data = await response.json();
           const text = (data.content || []).map((i) => i.text || "").join("").trim();
-          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+          logLine(`API raw reply: ${text.slice(0, 200)}`);
+          // Robust JSON extraction: find the first {...} block in the response.
+          // Claude sometimes prefixes with prose even when asked not to.
+          const cleaned = text.replace(/```json|```/g, "");
+          const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) {
+            throw new Error(`No JSON found in response: "${text.slice(0, 100)}…"`);
+          }
+          const parsed = JSON.parse(jsonMatch[0]);
           if (parsed.weight_kg === null || parsed.weight_kg === undefined) {
             setProcessingError("Couldn't read the weight. Try adjusting the crop, or tap Back to enter manually.");
             setCroppedImage(null); // stay on crop screen
