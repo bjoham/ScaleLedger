@@ -51,6 +51,8 @@
 
     const e = React.createElement;
 
+    const APP_VERSION = "v4";
+
     // ---------- Storage (localStorage) ----------
     const store = {
       get(key) {
@@ -224,11 +226,23 @@
           const ch = Math.max(1, Math.round(rawImageSize.h * cropRect.h));
           const cx = Math.round(rawImageSize.w * cropRect.x);
           const cy = Math.round(rawImageSize.h * cropRect.y);
+          // Upscale 2x so small digits are larger in the image sent to the API.
+          // Also cap at a reasonable maximum to avoid huge payloads.
+          const SCALE = 2;
+          const MAX_DIM = 2000;
+          let outW = cw * SCALE, outH = ch * SCALE;
+          if (outW > MAX_DIM || outH > MAX_DIM) {
+            const k = MAX_DIM / Math.max(outW, outH);
+            outW = Math.round(outW * k);
+            outH = Math.round(outH * k);
+          }
           const canvas = document.createElement("canvas");
-          canvas.width = cw;
-          canvas.height = ch;
+          canvas.width = outW;
+          canvas.height = outH;
           const ctx = canvas.getContext("2d");
-          ctx.drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          ctx.drawImage(img, cx, cy, cw, ch, 0, 0, outW, outH);
           const croppedDataUrl = canvas.toDataURL("image/png");
           setCroppedImage(croppedDataUrl);
           const base64 = croppedDataUrl.split(",")[1];
@@ -677,6 +691,11 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                 e("h2", { style: styles.sheetTitle }, editingId != null ? "Edit reading" : "Log weight"),
                 e("button", { style: styles.closeBtn, onClick: resetAddSheet }, e(X, { size: 18 }))
               ),
+              // Persistent file input — always mounted while the sheet is open
+              e("input", {
+                ref: fileInputRef, type: "file", accept: "image/*", capture: "environment",
+                onChange: handleImageUpload, style: { display: "none" },
+              }),
               editingId == null && e(React.Fragment, null,
                 // Stage 1: idle — show "Photograph your scale" button
                 !rawImage && !croppedImage && e(React.Fragment, null,
@@ -687,11 +706,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                   },
                     e(Camera, { size: 18 }),
                     e("span", null, apiKey ? "Photograph your scale" : "Add API key to enable photo")
-                  ),
-                  e("input", {
-                    ref: fileInputRef, type: "file", accept: "image/*", capture: "environment",
-                    onChange: handleImageUpload, style: { display: "none" },
-                  })
+                  )
                 ),
                 // Stage 2: crop — raw image loaded, no detected weight yet
                 rawImage && detectedWeight == null && e(React.Fragment, null,
@@ -746,11 +761,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                         disabled: !editableWeight || isNaN(parseFloat(editableWeight)),
                       }, "Save reading")
                     )
-                  ),
-                  e("input", {
-                    ref: fileInputRef, type: "file", accept: "image/*", capture: "environment",
-                    onChange: handleImageUpload, style: { display: "none" },
-                  })
+                  )
                 ),
                 processingError && e("div", { style: styles.errorBox }, processingError),
                 // Only show the manual-entry divider when in idle stage (no photo loaded)
@@ -846,7 +857,8 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                     saveEntries([]); setShowSettings(false);
                   }
                 },
-              }, "Clear all data")
+              }, "Clear all data"),
+              e("div", { style: styles.versionFooter }, `Ledger ${APP_VERSION}`)
             )
           ),
 
@@ -1144,6 +1156,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
       secondaryBtn: { flex: 1, padding: "10px 8px", background: "var(--paper-soft)", color: "var(--ink)", border: "1px solid var(--line)", borderRadius: 10, fontSize: 12, fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 },
       btnRow: { display: "flex", gap: 8, marginTop: 8 },
       dangerBtn: { width: "100%", padding: "12px", background: "transparent", color: "var(--accent-red)", border: "1px solid rgba(181, 74, 58, 0.3)", borderRadius: 10, fontSize: 14, fontWeight: 500, marginTop: 16 },
+      versionFooter: { textAlign: "center", fontSize: 10, color: "var(--ink-faint)", marginTop: 24, letterSpacing: "0.1em", textTransform: "uppercase" },
       hint: { fontSize: 12, color: "var(--ink-soft)", marginTop: 4, marginBottom: 8 },
       inlineMessage: { marginTop: 10, padding: "10px 12px", borderRadius: 8, fontSize: 12, border: "1px solid" },
     };
