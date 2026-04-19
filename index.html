@@ -229,7 +229,7 @@
           canvas.height = ch;
           const ctx = canvas.getContext("2d");
           ctx.drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
-          const croppedDataUrl = canvas.toDataURL("image/jpeg", 0.9);
+          const croppedDataUrl = canvas.toDataURL("image/png");
           setCroppedImage(croppedDataUrl);
           const base64 = croppedDataUrl.split(",")[1];
 
@@ -247,8 +247,25 @@
               messages: [{
                 role: "user",
                 content: [
-                  { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
-                  { type: "text", text: 'This is a cropped photo of a bathroom scale display. Read the weight value shown. Pay close attention: distinguish carefully between digits like 3/8, 0/8, 5/6, and 1/7. Respond ONLY with a JSON object in this exact format, no other text, no markdown: {"weight_kg": <number>, "confidence": "high"|"medium"|"low"}. If the value appears to be in pounds (lb), convert to kg. If you cannot read a weight, respond: {"weight_kg": null, "confidence": "low"}' },
+                  { type: "image", source: { type: "base64", media_type: "image/png", data: base64 } },
+                  { type: "text", text: `This is a cropped photo of a bathroom scale's 7-segment LCD display.
+
+Read the weight, digit by digit. For each digit position, look carefully at which segments are lit (top, top-left, top-right, middle, bottom-left, bottom-right, bottom).
+
+Common pitfalls:
+- 5 vs 9: a 5 has NO bottom-right segment in the top half (open on the right at top); a 9 is fully closed on the right
+- 5 vs 6: a 5 has NO bottom-left segment; a 6 does
+- 3 vs 8: a 3 has no left-side segments; an 8 has both left segments
+- 0 vs 8: a 0 has NO middle segment; an 8 has the middle segment
+- 1 vs 7: a 7 has the top segment; a 1 does not
+
+Ignore any faded "ghost" segments from previous readings — only count the clearly-lit segments.
+
+Respond ONLY with a JSON object, no other text, no markdown:
+{"digits": "<the digits you read, e.g. '90.5'>", "reasoning": "<one short sentence per digit>", "weight_kg": <number>, "confidence": "high"|"medium"|"low"}
+
+If the value is in pounds, convert to kg in the weight_kg field but keep the original in digits.
+If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_kg": null, "confidence": "low"}.` },
                 ],
               }],
             }),
