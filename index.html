@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v5";
+    const APP_VERSION = "v6";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -174,11 +174,6 @@
       const handleImageUpload = async (ev) => {
         const file = ev.target.files?.[0];
         if (!file) return;
-        if (!apiKey) {
-          setProcessingError("No API key saved. Add one in Settings first.");
-          if (fileInputRef.current) fileInputRef.current.value = "";
-          return;
-        }
         setProcessingError("");
         setDetectedWeight(null);
         setCroppedImage(null);
@@ -209,44 +204,44 @@
       };
 
       // Called when user confirms the crop ("Check" button).
+      // Renders the current raw image + cropRect to a data URL.
+      // Shared by sendCropped (with API) and proceedWithoutApi (no API).
+      const renderCropToDataUrl = async () => {
+        const img = await new Promise((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = () => reject(new Error("Could not load image"));
+          i.src = rawImage;
+        });
+        const cw = Math.max(1, Math.round(rawImageSize.w * cropRect.w));
+        const ch = Math.max(1, Math.round(rawImageSize.h * cropRect.h));
+        const cx = Math.round(rawImageSize.w * cropRect.x);
+        const cy = Math.round(rawImageSize.h * cropRect.y);
+        const SCALE = 2;
+        const MAX_DIM = 1568;
+        let outW = cw * SCALE, outH = ch * SCALE;
+        if (outW > MAX_DIM || outH > MAX_DIM) {
+          const k = MAX_DIM / Math.max(outW, outH);
+          outW = Math.round(outW * k);
+          outH = Math.round(outH * k);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, cx, cy, cw, ch, 0, 0, outW, outH);
+        return canvas.toDataURL("image/jpeg", 0.92);
+      };
+
       // Crops the raw image to the rectangle, sends to the API, then shows the review screen.
       const sendCropped = async () => {
         if (!rawImage || !rawImageSize || !apiKey) return;
         setProcessingError("");
         setImageProcessing(true);
         try {
-          // Render crop to a canvas
-          const img = await new Promise((resolve, reject) => {
-            const i = new Image();
-            i.onload = () => resolve(i);
-            i.onerror = () => reject(new Error("Could not load image"));
-            i.src = rawImage;
-          });
-          const cw = Math.max(1, Math.round(rawImageSize.w * cropRect.w));
-          const ch = Math.max(1, Math.round(rawImageSize.h * cropRect.h));
-          const cx = Math.round(rawImageSize.w * cropRect.x);
-          const cy = Math.round(rawImageSize.h * cropRect.y);
-          // Target output dimensions:
-          //  - Upscale 2x to help the model see small digits
-          //  - But cap at 1568px (Anthropic's recommended max; larger gets downscaled server-side anyway)
-          //  - Also never go below the crop's natural size
-          const SCALE = 2;
-          const MAX_DIM = 1568;
-          let outW = cw * SCALE, outH = ch * SCALE;
-          if (outW > MAX_DIM || outH > MAX_DIM) {
-            const k = MAX_DIM / Math.max(outW, outH);
-            outW = Math.round(outW * k);
-            outH = Math.round(outH * k);
-          }
-          const canvas = document.createElement("canvas");
-          canvas.width = outW;
-          canvas.height = outH;
-          const ctx = canvas.getContext("2d");
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = "high";
-          ctx.drawImage(img, cx, cy, cw, ch, 0, 0, outW, outH);
-          // High-quality JPEG: small file, near-lossless for this content
-          const croppedDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+          const croppedDataUrl = await renderCropToDataUrl();
           setCroppedImage(croppedDataUrl);
           const base64 = croppedDataUrl.split(",")[1];
 
@@ -309,6 +304,27 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
           console.error(err);
           setProcessingError(`Something went wrong: ${err.message || "unknown error"}. Try again or enter manually.`);
           setCroppedImage(null); // stay on crop screen so user can retry
+        } finally {
+          setImageProcessing(false);
+        }
+      };
+
+      // No API key: crop the image locally and go straight to the review screen
+      // with an empty editable weight. User types in the reading while looking at the photo.
+      const proceedWithoutApi = async () => {
+        if (!rawImage || !rawImageSize) return;
+        setProcessingError("");
+        setImageProcessing(true);
+        try {
+          const croppedDataUrl = await renderCropToDataUrl();
+          setCroppedImage(croppedDataUrl);
+          // Sentinel value: we need detectedWeight to be non-null so the review
+          // stage renders, but the editable input starts empty.
+          setDetectedWeight(0);
+          setEditableWeight("");
+        } catch (err) {
+          console.error(err);
+          setProcessingError(`Couldn't crop the image: ${err.message || "unknown error"}.`);
         } finally {
           setImageProcessing(false);
         }
@@ -705,10 +721,9 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                   e("button", {
                     style: styles.scanBtn,
                     onClick: () => fileInputRef.current?.click(),
-                    disabled: !apiKey,
                   },
                     e(Camera, { size: 18 }),
-                    e("span", null, apiKey ? "Photograph your scale" : "Add API key to enable photo")
+                    e("span", null, apiKey ? "Photograph your scale" : "Photograph scale (enter reading manually)")
                   )
                 ),
                 // Stage 2: crop — raw image loaded, no detected weight yet
@@ -733,12 +748,12 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                     }, "Retake"),
                     e("button", {
                       style: styles.primaryBtnFull,
-                      onClick: sendCropped,
+                      onClick: apiKey ? sendCropped : proceedWithoutApi,
                       disabled: imageProcessing,
                     },
                       imageProcessing
-                        ? e(React.Fragment, null, e(Loader2, { size: 18, style: { animation: "spin 1s linear infinite", marginRight: 8, verticalAlign: "middle" } }), "Reading…")
-                        : "Check"
+                        ? e(React.Fragment, null, e(Loader2, { size: 18, style: { animation: "spin 1s linear infinite", marginRight: 8, verticalAlign: "middle" } }), apiKey ? "Reading…" : "Cropping…")
+                        : (apiKey ? "Check" : "Enter reading")
                     )
                   )
                 ),
@@ -748,7 +763,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                     e("img", { src: croppedImage, alt: "Cropped scale", style: styles.previewImgFull })
                   ),
                   e("div", { style: styles.detectedBox },
-                    e("div", { style: styles.detectedLabel }, "Detected reading — edit if needed"),
+                    e("div", { style: styles.detectedLabel }, apiKey ? "Detected reading — edit if needed" : "Enter the reading from the photo"),
                     e("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 } },
                       e("input", {
                         type: "number", step: "0.1",
@@ -756,6 +771,8 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                         onChange: (ev) => setEditableWeight(ev.target.value),
                         style: styles.detectedInput,
                         inputMode: "decimal",
+                        autoFocus: !apiKey,
+                        placeholder: apiKey ? undefined : "e.g. 72.4",
                       }),
                       e("span", { style: { fontFamily: "var(--font-display)", fontStyle: "italic", color: "var(--ink-soft)", fontSize: 18 } }, "kg")
                     ),
