@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v7";
+    const APP_VERSION = "v8";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -1348,12 +1348,30 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
     const root = createRoot(document.getElementById("root"));
     root.render(e(WeightTracker));
 
-    // Register service worker
+    // Register service worker and actively check for updates on every app
+    // open / tab focus. This ensures new versions on the server reach the
+    // device without having to reinstall or clear site data.
     if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("./service-worker.js").catch((err) => {
+      window.addEventListener("load", async () => {
+        try {
+          const reg = await navigator.serviceWorker.register("./service-worker.js");
+          // Check for an updated worker on app open.
+          reg.update();
+          // Also check when the tab becomes visible again (app resumed).
+          document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") reg.update();
+          });
+          // When a new worker has taken control, reload the page so the user
+          // immediately sees the new version. Prevents getting stuck on old HTML.
+          let reloaded = false;
+          navigator.serviceWorker.addEventListener("controllerchange", () => {
+            if (reloaded) return;
+            reloaded = true;
+            window.location.reload();
+          });
+        } catch (err) {
           console.warn("SW registration failed:", err);
-        });
+        }
       });
     }
   </script>

@@ -1,6 +1,6 @@
-// Service worker for Weight Ledger
-// Bump CACHE_VERSION to force all clients to refresh cached files.
-const CACHE_VERSION = 'v7';
+// Service worker for Weight Ledger.
+// Bump CACHE_VERSION on every release to invalidate old caches.
+const CACHE_VERSION = 'v8';
 const CACHE_NAME = `ledger-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -13,7 +13,9 @@ const APP_SHELL = [
   './favicon.png',
 ];
 
-// Install: pre-cache the app shell.
+// Install: pre-cache the app shell. skipWaiting makes the new worker
+// take over immediately on next navigation, without waiting for all
+// clients to close.
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
@@ -21,7 +23,7 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate: clean up old caches.
+// Activate: clean up old caches and take control of all open pages.
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(
@@ -31,29 +33,57 @@ self.addEventListener('activate', (event) => {
 });
 
 // Fetch strategy:
-//   - API calls to Anthropic: always network (never cache).
-//   - App shell and static assets: cache-first, fall back to network.
-//   - CDN scripts (React, Recharts, Lucide, Babel): stale-while-revalidate.
+//   - Anthropic API: always network, never cache.
+//   - service-worker.js itself: NEVER intercept (let browser's update check see fresh bytes).
+//   - Navigation / index.html: network-first (fall back to cache if offline).
+//     This ensures users always get the latest HTML when online, which matters
+//     because index.html pins which version of everything else to load.
+//   - CDN libs (React, Recharts, OpenCV, fonts): stale-while-revalidate.
+//   - Everything else in app shell (icons, manifest): cache-first.
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
   // Never cache API calls.
   if (url.hostname === 'api.anthropic.com') {
-    return; // let the browser handle it normally
+    return;
   }
 
-  // For navigation requests, try cache first, fall back to network.
+  // Never intercept the service worker file itself — the browser needs
+  // to see fresh bytes to detect an update.
+  if (url.pathname.endsWith('/service-worker.js')) {
+    return;
+  }
+
+  // Navigation requests: network-first, fall back to cache.
   if (request.mode === 'navigate') {
     event.respondWith(
-      caches.match('./index.html').then((cached) =>
-        cached || fetch(request)
-      )
+      fetch(request).then((response) => {
+        if (response && response.status === 200) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put('./index.html', copy));
+        }
+        return response;
+      }).catch(() => caches.match('./index.html'))
     );
     return;
   }
 
-  // For CDN scripts, stale-while-revalidate.
+  // Same-origin index.html fetched directly: also network-first.
+  if (url.origin === self.location.origin && url.pathname.endsWith('/index.html')) {
+    event.respondWith(
+      fetch(request).then((response) => {
+        if (response && response.status === 200) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+        }
+        return response;
+      }).catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // CDN libraries: stale-while-revalidate.
   if (url.hostname === 'esm.sh' ||
       url.hostname === 'cdn.jsdelivr.net' ||
       url.hostname === 'unpkg.com' ||
@@ -68,7 +98,7 @@ self.addEventListener('fetch', (event) => {
               cache.put(request, response.clone());
             }
             return response;
-          }).catch(() => cached); // offline? use cache.
+          }).catch(() => cached);
           return cached || networkFetch;
         })
       )
