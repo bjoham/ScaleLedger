@@ -1,6 +1,6 @@
 // Service worker for Weight Ledger
 // Bump CACHE_VERSION to force all clients to refresh cached files.
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = `ledger-${CACHE_VERSION}`;
 
 const APP_SHELL = [

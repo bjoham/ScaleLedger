@@ -135,7 +135,11 @@
       const [imageProcessing, setImageProcessing] = useState(false);
       const [processingError, setProcessingError] = useState("");
       const [detectedWeight, setDetectedWeight] = useState(null);
-      const [previewImage, setPreviewImage] = useState(null);
+      const [editableWeight, setEditableWeight] = useState(""); // string for the editable input
+      const [rawImage, setRawImage] = useState(null);      // data URL just after taking photo, with natural dimensions
+      const [rawImageSize, setRawImageSize] = useState(null); // { w, h }
+      const [cropRect, setCropRect] = useState({ x: 0.2, y: 0.2, w: 0.6, h: 0.6 }); // fractions 0..1
+      const [croppedImage, setCroppedImage] = useState(null); // data URL of cropped region (shown on review screen)
       const [windowKey, setWindowKey] = useState("1m");
       const [importMessage, setImportMessage] = useState(null);
       const [showAllHistory, setShowAllHistory] = useState(false);
@@ -173,15 +177,62 @@
           if (fileInputRef.current) fileInputRef.current.value = "";
           return;
         }
-        setProcessingError(""); setDetectedWeight(null); setImageProcessing(true);
+        setProcessingError("");
+        setDetectedWeight(null);
+        setCroppedImage(null);
         try {
-          const base64 = await new Promise((resolve, reject) => {
+          // Read the file and figure out its natural dimensions
+          const dataUrl = await new Promise((resolve, reject) => {
             const reader = new FileReader();
-            reader.onload = () => resolve(reader.result.split(",")[1]);
+            reader.onload = () => resolve(reader.result);
             reader.onerror = () => reject(new Error("Could not read image"));
             reader.readAsDataURL(file);
           });
-          setPreviewImage(`data:${file.type};base64,${base64}`);
+          const img = await new Promise((resolve, reject) => {
+            const i = new Image();
+            i.onload = () => resolve(i);
+            i.onerror = () => reject(new Error("Could not load image"));
+            i.src = dataUrl;
+          });
+          setRawImage(dataUrl);
+          setRawImageSize({ w: img.naturalWidth, h: img.naturalHeight });
+          // Default crop: centered, 60% of each dimension
+          setCropRect({ x: 0.2, y: 0.2, w: 0.6, h: 0.6 });
+        } catch (err) {
+          console.error(err);
+          setProcessingError(`Couldn't load the photo: ${err.message || "unknown error"}.`);
+        } finally {
+          if (fileInputRef.current) fileInputRef.current.value = "";
+        }
+      };
+
+      // Called when user confirms the crop ("Check" button).
+      // Crops the raw image to the rectangle, sends to the API, then shows the review screen.
+      const sendCropped = async () => {
+        if (!rawImage || !rawImageSize || !apiKey) return;
+        setProcessingError("");
+        setImageProcessing(true);
+        try {
+          // Render crop to a canvas
+          const img = await new Promise((resolve, reject) => {
+            const i = new Image();
+            i.onload = () => resolve(i);
+            i.onerror = () => reject(new Error("Could not load image"));
+            i.src = rawImage;
+          });
+          const cw = Math.max(1, Math.round(rawImageSize.w * cropRect.w));
+          const ch = Math.max(1, Math.round(rawImageSize.h * cropRect.h));
+          const cx = Math.round(rawImageSize.w * cropRect.x);
+          const cy = Math.round(rawImageSize.h * cropRect.y);
+          const canvas = document.createElement("canvas");
+          canvas.width = cw;
+          canvas.height = ch;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
+          const croppedDataUrl = canvas.toDataURL("image/jpeg", 0.9);
+          setCroppedImage(croppedDataUrl);
+          const base64 = croppedDataUrl.split(",")[1];
+
           const response = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
             headers: {
@@ -196,8 +247,8 @@
               messages: [{
                 role: "user",
                 content: [
-                  { type: "image", source: { type: "base64", media_type: file.type, data: base64 } },
-                  { type: "text", text: 'This is a photo of a bathroom scale display. Read the weight value shown. Respond ONLY with a JSON object in this exact format, no other text, no markdown: {"weight_kg": <number>, "confidence": "high"|"medium"|"low"}. If the value appears to be in pounds (lb), convert to kg. If you cannot read a weight, respond: {"weight_kg": null, "confidence": "low"}' },
+                  { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+                  { type: "text", text: 'This is a cropped photo of a bathroom scale display. Read the weight value shown. Pay close attention: distinguish carefully between digits like 3/8, 0/8, 5/6, and 1/7. Respond ONLY with a JSON object in this exact format, no other text, no markdown: {"weight_kg": <number>, "confidence": "high"|"medium"|"low"}. If the value appears to be in pounds (lb), convert to kg. If you cannot read a weight, respond: {"weight_kg": null, "confidence": "low"}' },
                 ],
               }],
             }),
@@ -210,24 +261,34 @@
           const text = (data.content || []).map((i) => i.text || "").join("").trim();
           const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
           if (parsed.weight_kg === null || parsed.weight_kg === undefined) {
-            setProcessingError("Couldn't read the weight. Try a clearer photo or enter manually.");
+            setProcessingError("Couldn't read the weight. Try adjusting the crop, or tap Back to enter manually.");
+            setCroppedImage(null); // stay on crop screen
           } else if (parsed.weight_kg < 20 || parsed.weight_kg > 300) {
             setProcessingError(`Got ${parsed.weight_kg} kg — that seems off. Please verify.`);
             setDetectedWeight(parsed.weight_kg);
+            setEditableWeight(parsed.weight_kg.toFixed(1));
           } else {
             setDetectedWeight(parsed.weight_kg);
+            setEditableWeight(parsed.weight_kg.toFixed(1));
           }
         } catch (err) {
           console.error(err);
           setProcessingError(`Something went wrong: ${err.message || "unknown error"}. Try again or enter manually.`);
+          setCroppedImage(null); // stay on crop screen so user can retry
         } finally {
           setImageProcessing(false);
-          if (fileInputRef.current) fileInputRef.current.value = "";
         }
       };
 
+      // "Back" from the crop screen: clear raw image, go back to idle.
+      const backFromCrop = () => {
+        setRawImage(null); setRawImageSize(null); setCroppedImage(null);
+        setDetectedWeight(null); setEditableWeight(""); setProcessingError("");
+      };
+
       const confirmDetected = () => {
-        if (detectedWeight != null) { addEntry(detectedWeight, new Date().toISOString()); resetAddSheet(); }
+        const w = parseFloat(editableWeight);
+        if (!isNaN(w) && w > 0) { addEntry(w, new Date().toISOString()); resetAddSheet(); }
       };
 
       const submitManual = () => {
@@ -257,7 +318,9 @@
 
       const resetAddSheet = () => {
         setShowAdd(false); setManualWeight(""); setManualDate(new Date().toISOString().slice(0, 16));
-        setDetectedWeight(null); setPreviewImage(null); setProcessingError(""); setEditingId(null);
+        setDetectedWeight(null); setEditableWeight("");
+        setRawImage(null); setRawImageSize(null); setCroppedImage(null);
+        setProcessingError(""); setEditingId(null);
       };
 
       const exportJson = () => {
@@ -598,45 +661,102 @@
                 e("button", { style: styles.closeBtn, onClick: resetAddSheet }, e(X, { size: 18 }))
               ),
               editingId == null && e(React.Fragment, null,
-                e("button", {
-                  style: styles.scanBtn,
-                  onClick: () => fileInputRef.current?.click(),
-                  disabled: imageProcessing || !apiKey,
-                },
-                  imageProcessing
-                    ? e(React.Fragment, null, e(Loader2, { size: 18, style: { animation: "spin 1s linear infinite" } }), e("span", null, "Reading your scale…"))
-                    : e(React.Fragment, null, e(Camera, { size: 18 }), e("span", null, apiKey ? "Photograph your scale" : "Add API key to enable photo"))
+                // Stage 1: idle — show "Photograph your scale" button
+                !rawImage && !croppedImage && e(React.Fragment, null,
+                  e("button", {
+                    style: styles.scanBtn,
+                    onClick: () => fileInputRef.current?.click(),
+                    disabled: !apiKey,
+                  },
+                    e(Camera, { size: 18 }),
+                    e("span", null, apiKey ? "Photograph your scale" : "Add API key to enable photo")
+                  ),
+                  e("input", {
+                    ref: fileInputRef, type: "file", accept: "image/*", capture: "environment",
+                    onChange: handleImageUpload, style: { display: "none" },
+                  })
                 ),
-                e("input", {
-                  ref: fileInputRef, type: "file", accept: "image/*", capture: "environment",
-                  onChange: handleImageUpload, style: { display: "none" },
-                }),
-                previewImage && e("div", { style: styles.previewBox },
-                  e("img", { src: previewImage, alt: "Scale", style: styles.previewImg })
+                // Stage 2: crop — raw image loaded, no detected weight yet
+                rawImage && detectedWeight == null && e(React.Fragment, null,
+                  e("div", { style: styles.cropHint }, "Drag to position the crop around the scale's display, then tap Check."),
+                  e(CropOverlay, {
+                    src: rawImage,
+                    rect: cropRect,
+                    onRectChange: setCropRect,
+                  }),
+                  e("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
+                    e("button", {
+                      style: styles.secondaryBtnFull,
+                      onClick: backFromCrop,
+                      disabled: imageProcessing,
+                    }, "Back"),
+                    e("button", {
+                      style: styles.primaryBtnFull,
+                      onClick: sendCropped,
+                      disabled: imageProcessing,
+                    },
+                      imageProcessing
+                        ? e(React.Fragment, null, e(Loader2, { size: 18, style: { animation: "spin 1s linear infinite", marginRight: 8, verticalAlign: "middle" } }), "Reading…")
+                        : "Check"
+                    )
+                  )
                 ),
-                detectedWeight != null && !imageProcessing && e("div", { style: styles.detectedBox },
-                  e("div", { style: styles.detectedLabel }, "Detected reading"),
-                  e("div", { style: styles.detectedValue }, detectedWeight.toFixed(1), " kg"),
-                  e("button", { style: styles.primaryBtn, onClick: confirmDetected }, "Save this reading")
+                // Stage 3: review — detected weight, show cropped image, editable reading
+                detectedWeight != null && croppedImage && e(React.Fragment, null,
+                  e("div", { style: styles.previewBoxFull },
+                    e("img", { src: croppedImage, alt: "Cropped scale", style: styles.previewImgFull })
+                  ),
+                  e("div", { style: styles.detectedBox },
+                    e("div", { style: styles.detectedLabel }, "Detected reading — edit if needed"),
+                    e("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 } },
+                      e("input", {
+                        type: "number", step: "0.1",
+                        value: editableWeight,
+                        onChange: (ev) => setEditableWeight(ev.target.value),
+                        style: styles.detectedInput,
+                        inputMode: "decimal",
+                      }),
+                      e("span", { style: { fontFamily: "var(--font-display)", fontStyle: "italic", color: "var(--ink-soft)", fontSize: 18 } }, "kg")
+                    ),
+                    e("div", { style: { display: "flex", gap: 8 } },
+                      e("button", {
+                        style: styles.secondaryBtnFull,
+                        onClick: () => { backFromCrop(); fileInputRef.current?.click(); },
+                      }, "Photograph again"),
+                      e("button", {
+                        style: styles.primaryBtnFull,
+                        onClick: confirmDetected,
+                        disabled: !editableWeight || isNaN(parseFloat(editableWeight)),
+                      }, "Save reading")
+                    )
+                  ),
+                  e("input", {
+                    ref: fileInputRef, type: "file", accept: "image/*", capture: "environment",
+                    onChange: handleImageUpload, style: { display: "none" },
+                  })
                 ),
                 processingError && e("div", { style: styles.errorBox }, processingError),
-                e("div", { style: styles.divider }, e("span", { style: styles.dividerText }, "or enter manually"))
+                // Only show the manual-entry divider when in idle stage (no photo loaded)
+                !rawImage && !croppedImage && e("div", { style: styles.divider }, e("span", { style: styles.dividerText }, "or enter manually"))
               ),
-              e("label", { style: styles.fieldLabel }, "Weight (kg)"),
-              e("input", {
-                type: "number", step: "0.1", placeholder: "e.g. 72.4",
-                value: manualWeight, onChange: (ev) => setManualWeight(ev.target.value),
-                style: styles.input, inputMode: "decimal",
-              }),
-              e("label", { style: styles.fieldLabel }, "Date & time"),
-              e("input", {
-                type: "datetime-local", value: manualDate,
-                onChange: (ev) => setManualDate(ev.target.value), style: styles.input,
-              }),
-              e("button", {
-                style: { ...styles.primaryBtn, marginTop: 16, opacity: manualWeight ? 1 : 0.4 },
-                onClick: submitManual, disabled: !manualWeight,
-              }, editingId != null ? "Save changes" : "Save entry")
+              // Manual entry — only shown when not in photo-review stages
+              (editingId != null || (!rawImage && !croppedImage)) && e(React.Fragment, null,
+                e("label", { style: styles.fieldLabel }, "Weight (kg)"),
+                e("input", {
+                  type: "number", step: "0.1", placeholder: "e.g. 72.4",
+                  value: manualWeight, onChange: (ev) => setManualWeight(ev.target.value),
+                  style: styles.input, inputMode: "decimal",
+                }),
+                e("label", { style: styles.fieldLabel }, "Date & time"),
+                e("input", {
+                  type: "datetime-local", value: manualDate,
+                  onChange: (ev) => setManualDate(ev.target.value), style: styles.input,
+                }),
+                e("button", {
+                  style: { ...styles.primaryBtn, marginTop: 16, opacity: manualWeight ? 1 : 0.4 },
+                  onClick: submitManual, disabled: !manualWeight,
+                }, editingId != null ? "Save changes" : "Save entry")
+              )
             )
           ),
 
@@ -753,6 +873,148 @@
       );
     }
 
+    function CropOverlay({ src, rect, onRectChange }) {
+      const containerRef = useRef(null);
+      const imgRef = useRef(null);
+      const [dragState, setDragState] = useState(null);
+      // dragState shape: { mode: 'move' | 'tl' | 'tr' | 'bl' | 'br', startX, startY, origRect }
+
+      const MIN_SIZE = 0.05; // minimum crop size as a fraction
+
+      const getPointerFrac = (ev) => {
+        const el = containerRef.current;
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
+        const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+        return {
+          x: Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+          y: Math.max(0, Math.min(1, (clientY - r.top) / r.height)),
+        };
+      };
+
+      const onPointerDown = (mode) => (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const p = getPointerFrac(ev);
+        if (!p) return;
+        setDragState({ mode, startX: p.x, startY: p.y, origRect: { ...rect } });
+      };
+
+      const onPointerMove = (ev) => {
+        if (!dragState) return;
+        ev.preventDefault();
+        const p = getPointerFrac(ev);
+        if (!p) return;
+        const dx = p.x - dragState.startX;
+        const dy = p.y - dragState.startY;
+        const o = dragState.origRect;
+        let nx = o.x, ny = o.y, nw = o.w, nh = o.h;
+        if (dragState.mode === "move") {
+          nx = Math.max(0, Math.min(1 - o.w, o.x + dx));
+          ny = Math.max(0, Math.min(1 - o.h, o.y + dy));
+        } else {
+          // Corner drag — left/right edges
+          if (dragState.mode === "tl" || dragState.mode === "bl") {
+            const newX = Math.max(0, Math.min(o.x + o.w - MIN_SIZE, o.x + dx));
+            nw = o.w + (o.x - newX);
+            nx = newX;
+          } else {
+            nw = Math.max(MIN_SIZE, Math.min(1 - o.x, o.w + dx));
+          }
+          // Top/bottom edges
+          if (dragState.mode === "tl" || dragState.mode === "tr") {
+            const newY = Math.max(0, Math.min(o.y + o.h - MIN_SIZE, o.y + dy));
+            nh = o.h + (o.y - newY);
+            ny = newY;
+          } else {
+            nh = Math.max(MIN_SIZE, Math.min(1 - o.y, o.h + dy));
+          }
+        }
+        onRectChange({ x: nx, y: ny, w: nw, h: nh });
+      };
+
+      const onPointerUp = () => setDragState(null);
+
+      useEffect(() => {
+        if (!dragState) return;
+        const move = (ev) => onPointerMove(ev);
+        const up = () => onPointerUp();
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+        window.addEventListener("touchmove", move, { passive: false });
+        window.addEventListener("touchend", up);
+        return () => {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+          window.removeEventListener("touchmove", move);
+          window.removeEventListener("touchend", up);
+        };
+      }, [dragState]);
+
+      const pct = (v) => `${v * 100}%`;
+      const handleSize = 22;
+
+      return e("div", {
+        ref: containerRef,
+        style: {
+          position: "relative",
+          width: "100%",
+          background: "#000",
+          borderRadius: 12,
+          overflow: "hidden",
+          userSelect: "none",
+          touchAction: "none",
+        },
+      },
+        e("img", {
+          ref: imgRef,
+          src,
+          alt: "Scale photo",
+          style: { display: "block", width: "100%", height: "auto", pointerEvents: "none" },
+        }),
+        // Dimmed overlay - four strips around the crop rect
+        e("div", { style: { position: "absolute", left: 0, top: 0, right: 0, height: pct(rect.y), background: "rgba(0,0,0,0.5)", pointerEvents: "none" } }),
+        e("div", { style: { position: "absolute", left: 0, top: pct(rect.y + rect.h), right: 0, bottom: 0, background: "rgba(0,0,0,0.5)", pointerEvents: "none" } }),
+        e("div", { style: { position: "absolute", left: 0, top: pct(rect.y), width: pct(rect.x), height: pct(rect.h), background: "rgba(0,0,0,0.5)", pointerEvents: "none" } }),
+        e("div", { style: { position: "absolute", left: pct(rect.x + rect.w), top: pct(rect.y), right: 0, height: pct(rect.h), background: "rgba(0,0,0,0.5)", pointerEvents: "none" } }),
+        // Crop rectangle (draggable to move)
+        e("div", {
+          onMouseDown: onPointerDown("move"),
+          onTouchStart: onPointerDown("move"),
+          style: {
+            position: "absolute",
+            left: pct(rect.x), top: pct(rect.y),
+            width: pct(rect.w), height: pct(rect.h),
+            border: "2px solid #f5f1ea",
+            boxSizing: "border-box",
+            cursor: "move",
+          },
+        }),
+        // Corner handles
+        ...["tl", "tr", "bl", "br"].map((corner) => {
+          const left = corner.endsWith("l") ? rect.x : rect.x + rect.w;
+          const top = corner.startsWith("t") ? rect.y : rect.y + rect.h;
+          return e("div", {
+            key: corner,
+            onMouseDown: onPointerDown(corner),
+            onTouchStart: onPointerDown(corner),
+            style: {
+              position: "absolute",
+              left: `calc(${pct(left)} - ${handleSize / 2}px)`,
+              top: `calc(${pct(top)} - ${handleSize / 2}px)`,
+              width: handleSize, height: handleSize,
+              background: "#f5f1ea",
+              border: "2px solid #1a1713",
+              borderRadius: "50%",
+              cursor: corner === "tl" || corner === "br" ? "nwse-resize" : "nesw-resize",
+              touchAction: "none",
+            },
+          });
+        }),
+      );
+    }
+
     function Stat({ label, value }) {
       return e("div", { style: styles.stat },
         e("div", { style: styles.statLabel }, label),
@@ -845,6 +1107,12 @@
       closeBtn: { background: "transparent", border: "none", color: "var(--ink-soft)", padding: 6, display: "flex" },
       scanBtn: { width: "100%", padding: "16px", background: "var(--ink)", color: "var(--paper)", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "center", gap: 10 },
       previewBox: { marginTop: 14, borderRadius: 12, overflow: "hidden", border: "1px solid var(--line)", maxHeight: 180 },
+      previewBoxFull: { marginTop: 4, borderRadius: 12, overflow: "hidden", border: "1px solid var(--line)", background: "#000" },
+      previewImgFull: { width: "100%", height: "auto", display: "block" },
+      cropHint: { fontSize: 12, color: "var(--ink-soft)", marginBottom: 10, lineHeight: 1.4 },
+      primaryBtnFull: { flex: 1, padding: "14px", background: "var(--ink)", color: "var(--paper)", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 500 },
+      secondaryBtnFull: { flex: 1, padding: "14px", background: "var(--paper-soft)", color: "var(--ink)", border: "1px solid var(--line)", borderRadius: 10, fontSize: 15, fontWeight: 500 },
+      detectedInput: { width: 140, padding: "8px 12px", border: "1px solid var(--line)", borderRadius: 8, fontSize: 28, fontFamily: "var(--font-display)", fontWeight: 500, background: "var(--paper)", color: "var(--ink)" },
       previewImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
       detectedBox: { marginTop: 14, padding: 16, background: "var(--paper-soft)", borderRadius: 12, border: "1px solid var(--line)" },
       detectedLabel: { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-soft)", marginBottom: 4 },
