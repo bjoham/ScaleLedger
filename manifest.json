@@ -1,6 +1,6 @@
 {
-  "name": "Weight Ledger",
-  "short_name": "Ledger",
+  "name": "ScaleLedger",
+  "short_name": "ScaleLedger",
   "description": "A quiet weight tracker with scale-photo reading.",
   "start_url": "./",
   "scope": "./",

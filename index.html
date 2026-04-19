@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#1a1713">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="Ledger">
-  <title>Weight Ledger</title>
+  <meta name="apple-mobile-web-app-title" content="ScaleLedger">
+  <title>ScaleLedger</title>
   <link rel="manifest" href="./manifest.json">
   <link rel="icon" type="image/png" href="./favicon.png">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png">
@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v14";
+    const APP_VERSION = "v15";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -589,7 +589,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url; a.download = `weight-ledger-${new Date().toISOString().slice(0, 10)}.json`;
+        a.href = url; a.download = `scaleledger-${new Date().toISOString().slice(0, 10)}.json`;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         URL.revokeObjectURL(url);
       };
@@ -752,7 +752,10 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
           e("header", { style: styles.header },
             e("div", null,
               e("div", { style: styles.eyebrow }, "Your weight"),
-              e("h1", { style: styles.title }, "Ledger")
+              e("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } },
+                e("h1", { style: styles.title }, "ScaleLedger"),
+                e("span", { style: styles.versionBadge }, APP_VERSION)
+              )
             ),
             e("button", { style: styles.iconBtn, onClick: () => setShowSettings(true), "aria-label": "Settings" },
               e(Settings, { size: 18 })
@@ -816,6 +819,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                     type: "number", domain: yDomain, ticks: yTicks,
                     tick: { fontSize: 10, fill: "var(--ink-soft)" },
                     axisLine: false, tickLine: false, width: 32,
+                    allowDataOverflow: true,
                   }),
                   e(Tooltip, {
                     contentStyle: { background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12, fontFamily: "var(--font-sans)" },
@@ -1032,10 +1036,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
             e("div", { style: styles.sheet, onClick: (ev) => ev.stopPropagation() },
               e("div", { style: styles.sheetHandle }),
               e("div", { style: styles.sheetHeader },
-                e("div", { style: { display: "flex", alignItems: "baseline", gap: 10 } },
-                  e("h2", { style: styles.sheetTitle }, "Settings"),
-                  e("span", { style: styles.versionBadge }, APP_VERSION)
-                ),
+                e("h2", { style: styles.sheetTitle }, "Settings"),
                 e("button", { style: styles.closeBtn, onClick: () => setShowSettings(false) }, e(X, { size: 18 }))
               ),
               e("label", { style: styles.fieldLabel }, "Your height (cm)"),
@@ -1129,9 +1130,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                   onClick: () => { setDebugLog([]); store.remove("debug-log"); },
                   disabled: debugLog.length === 0,
                 }, "Clear log")
-              ),
-
-              e("div", { style: styles.versionFooter }, `Ledger ${APP_VERSION}`)
+              )
             )
           ),
 
