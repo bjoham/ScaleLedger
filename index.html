@@ -51,7 +51,7 @@
 
     const e = React.createElement;
 
-    const APP_VERSION = "v4";
+    const APP_VERSION = "v5";
 
     // ---------- Storage (localStorage) ----------
     const store = {
@@ -226,10 +226,12 @@
           const ch = Math.max(1, Math.round(rawImageSize.h * cropRect.h));
           const cx = Math.round(rawImageSize.w * cropRect.x);
           const cy = Math.round(rawImageSize.h * cropRect.y);
-          // Upscale 2x so small digits are larger in the image sent to the API.
-          // Also cap at a reasonable maximum to avoid huge payloads.
+          // Target output dimensions:
+          //  - Upscale 2x to help the model see small digits
+          //  - But cap at 1568px (Anthropic's recommended max; larger gets downscaled server-side anyway)
+          //  - Also never go below the crop's natural size
           const SCALE = 2;
-          const MAX_DIM = 2000;
+          const MAX_DIM = 1568;
           let outW = cw * SCALE, outH = ch * SCALE;
           if (outW > MAX_DIM || outH > MAX_DIM) {
             const k = MAX_DIM / Math.max(outW, outH);
@@ -243,7 +245,8 @@
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = "high";
           ctx.drawImage(img, cx, cy, cw, ch, 0, 0, outW, outH);
-          const croppedDataUrl = canvas.toDataURL("image/png");
+          // High-quality JPEG: small file, near-lossless for this content
+          const croppedDataUrl = canvas.toDataURL("image/jpeg", 0.92);
           setCroppedImage(croppedDataUrl);
           const base64 = croppedDataUrl.split(",")[1];
 
@@ -261,7 +264,7 @@
               messages: [{
                 role: "user",
                 content: [
-                  { type: "image", source: { type: "base64", media_type: "image/png", data: base64 } },
+                  { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
                   { type: "text", text: `This is a cropped photo of a bathroom scale's 7-segment LCD display.
 
 Read the weight, digit by digit. For each digit position, look carefully at which segments are lit (top, top-left, top-right, middle, bottom-left, bottom-right, bottom).
@@ -719,9 +722,15 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                   e("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
                     e("button", {
                       style: styles.secondaryBtnFull,
-                      onClick: backFromCrop,
+                      onClick: () => {
+                        backFromCrop();
+                        if (fileInputRef.current) {
+                          fileInputRef.current.value = "";
+                          fileInputRef.current.click();
+                        }
+                      },
                       disabled: imageProcessing,
-                    }, "Back"),
+                    }, "Retake"),
                     e("button", {
                       style: styles.primaryBtnFull,
                       onClick: sendCropped,
@@ -753,7 +762,13 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
                     e("div", { style: { display: "flex", gap: 8 } },
                       e("button", {
                         style: styles.secondaryBtnFull,
-                        onClick: () => { backFromCrop(); fileInputRef.current?.click(); },
+                        onClick: () => {
+                          backFromCrop();
+                          if (fileInputRef.current) {
+                            fileInputRef.current.value = "";
+                            fileInputRef.current.click();
+                          }
+                        },
                       }, "Photograph again"),
                       e("button", {
                         style: styles.primaryBtnFull,
@@ -793,7 +808,10 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
             e("div", { style: styles.sheet, onClick: (ev) => ev.stopPropagation() },
               e("div", { style: styles.sheetHandle }),
               e("div", { style: styles.sheetHeader },
-                e("h2", { style: styles.sheetTitle }, "Settings"),
+                e("div", { style: { display: "flex", alignItems: "baseline", gap: 10 } },
+                  e("h2", { style: styles.sheetTitle }, "Settings"),
+                  e("span", { style: styles.versionBadge }, APP_VERSION)
+                ),
                 e("button", { style: styles.closeBtn, onClick: () => setShowSettings(false) }, e(X, { size: 18 }))
               ),
               e("label", { style: styles.fieldLabel }, "Your height (cm)"),
@@ -1157,6 +1175,7 @@ If you cannot read a weight, use {"digits": null, "reasoning": "<why>", "weight_
       btnRow: { display: "flex", gap: 8, marginTop: 8 },
       dangerBtn: { width: "100%", padding: "12px", background: "transparent", color: "var(--accent-red)", border: "1px solid rgba(181, 74, 58, 0.3)", borderRadius: 10, fontSize: 14, fontWeight: 500, marginTop: 16 },
       versionFooter: { textAlign: "center", fontSize: 10, color: "var(--ink-faint)", marginTop: 24, letterSpacing: "0.1em", textTransform: "uppercase" },
+      versionBadge: { fontSize: 10, color: "var(--ink-faint)", letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 },
       hint: { fontSize: 12, color: "var(--ink-soft)", marginTop: 4, marginBottom: 8 },
       inlineMessage: { marginTop: 10, padding: "10px 12px", borderRadius: 8, fontSize: 12, border: "1px solid" },
     };
